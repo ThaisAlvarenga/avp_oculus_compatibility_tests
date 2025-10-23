@@ -58,13 +58,13 @@ dolly.position.set(-5, 0, 12);
 // --- GAZE RAYCAST HELPERS ---
 const gazeRaycaster = new THREE.Raycaster();
 const GAZE_MAX_DIST = 50;
-const SELECT_COOLDOWN_MS = 250; // brief pause after selecting to avoid accidental motion
+const SELECT_COOLDOWN_MS = 200; // brief pause after selecting to avoid accidental motion
 let lastSelectTime = 0;
 
 // only certain things are selectable
 // e.g. everything except the floor. You can adjust this.
 function isSelectable(obj) {
-  return obj.isMesh && obj !== floorMesh;
+  return obj.isMesh && obj.userData.selectable !== false;
 }
 
 function getGazeHit() {
@@ -119,6 +119,7 @@ floorMesh.rotation.x = -Math.PI / 2.0;
 floorMesh.name = 'Floor';
 floorMesh.receiveShadow = true;
 scene.add(floorMesh);
+floorMesh.userData.selectable = false; // mark floor as not color-selectable
 
 function createMesh(geometry, material, x, y, z, name, layer) {
   const mesh = new THREE.Mesh(geometry, material.clone());
@@ -158,13 +159,15 @@ function onMouseDown(event) {
   raycaster.setFromCamera(coords, camera);
 
   const intersections = raycaster.intersectObjects(scene.children, true);
-  if (intersections.length > 0) {
-    const selectedObject = intersections[0].object;
+  const hit = intersections.find(h => isSelectable(h.object)); // ⬅️ only selectable
+  if (hit) {
+    const obj = hit.object;
     const color = new THREE.Color(Math.random(), Math.random(), Math.random());
-    selectedObject.material.color = color;
-    console.log(`${selectedObject.name} was clicked!`);
+    obj.material.color = color;
+    console.log(`${obj.name} was clicked!`);
   }
 }
+
 
 // ===============================
 // XR RAYCAST HELPERS
