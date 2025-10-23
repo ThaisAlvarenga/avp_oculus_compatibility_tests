@@ -54,6 +54,55 @@ yawPivot.add(camera);
 // Start dolly near your desktop camera pose (so switching feels consistent)
 dolly.position.set(-5, 0, 12);
 
+
+// --- GAZE RAYCAST HELPERS ---
+const gazeRaycaster = new THREE.Raycaster();
+const GAZE_MAX_DIST = 50;
+const SELECT_COOLDOWN_MS = 250; // brief pause after selecting to avoid accidental motion
+let lastSelectTime = 0;
+
+// only certain things are selectable
+// e.g. everything except the floor. You can adjust this.
+function isSelectable(obj) {
+  return obj.isMesh && obj !== floorMesh;
+}
+
+function getGazeHit() {
+  const xrCam = renderer.xr.getCamera(camera); // viewer pose
+  const origin = new THREE.Vector3();
+  const dir = new THREE.Vector3(0, 0, -1);
+  xrCam.getWorldPosition(origin);
+  dir.applyQuaternion(xrCam.quaternion);
+
+  gazeRaycaster.set(origin, dir.normalize());
+  gazeRaycaster.far = GAZE_MAX_DIST;
+
+  const hits = gazeRaycaster.intersectObjects(scene.children, true);
+  for (const h of hits) {
+    if (isSelectable(h.object)) return h; // first selectable
+  }
+  return null;
+}
+
+// simple visual reticle at gaze hit
+const gazeReticleGeo = new THREE.RingGeometry(0.05, 0.06, 32);
+gazeReticleGeo.rotateX(-Math.PI / 2);
+const gazeReticleMat = new THREE.MeshBasicMaterial({ color: 0xffff00, transparent: true, opacity: 0.8 });
+const gazeReticle = new THREE.Mesh(gazeReticleGeo, gazeReticleMat);
+gazeReticle.visible = false;
+scene.add(gazeReticle);
+
+function updateGazeReticle() {
+  const hit = getGazeHit();
+  if (hit) {
+    gazeReticle.position.copy(hit.point);
+    gazeReticle.visible = true;
+  } else {
+    gazeReticle.visible = false;
+  }
+}
+
+
 // ---------------------------
 // Your original scene content
 // ---------------------------
@@ -193,18 +242,33 @@ function controllerVisual(data) {
   }
   return null;
 }
+
 [controller1, controller2].forEach((ctrl) => {
   ctrl.addEventListener('connected', (e) => {
     ctrl.userData.inputSource = e.data;
     const vis = controllerVisual(e.data);
     if (vis) ctrl.add(vis);
   });
+
   ctrl.addEventListener('disconnected', () => {
     ctrl.userData.inputSource = null;
     ctrl.clear();
   });
-  ctrl.addEventListener('selectstart', function(){ this.userData.isSelecting = true;  });
-  ctrl.addEventListener('selectend',   function(){ this.userData.isSelecting = false; });
+
+  ctrl.addEventListener('selectstart', function() {
+    this.userData.isSelecting = true;
+
+    // PRIORITY: if gaze is on something selectable, select it (change color) and start cooldown
+    const hit = getGazeHit();
+    if (hit && hit.object && hit.object.material && hit.object.material.color) {
+      hit.object.material.color.setRGB(Math.random(), Math.random(), Math.random());
+      lastSelectTime = performance.now();
+    }
+  });
+
+  ctrl.addEventListener('selectend', function() {
+    this.userData.isSelecting = false;
+  });
 });
 
 // ---------------------------
@@ -319,39 +383,32 @@ function applyAVPSelectStep(dt) {
   const anyAxes =
     Math.hypot(controllerStates.left.axes.x, controllerStates.left.axes.y) > NAV.deadzone ||
     Math.hypot(controllerStates.right.axes.x, controllerStates.right.axes.y) > NAV.deadzone;
-
   if (anyAxes) return;
 
-  [controller1, controller2].forEach((ctrl) => {
-  ctrl.addEventListener('connected', (e) => {
-    ctrl.userData.inputSource = e.data;
-    const vis = controllerVisual(e.data);
-    if (vis) ctrl.add(vis);
-  });
-  ctrl.addEventListener('disconnected', () => {
-    ctrl.userData.inputSource = null;
-    ctrl.clear();
-  });
+  // Don’t move immediately after a selection (prevents accidental step right after recolor)
+  const now = performance.now();
+  if (now - lastSelectTime < SELECT_COOLDOWN_MS) return;
 
-  ctrl.addEventListener('selectstart', function () {
-    this.userData.isSelecting = true;
+  // If either controller is selecting AND gaze has NO selectable target, step forward
+  const selecting =
+    (controller1?.userData?.isSelecting) || (controller2?.userData?.isSelecting);
 
-    const src = this.userData.inputSource;
-    // If it's a tracked pointer (Quest-style), raycast from controller.
-    if (src && src.targetRayMode === 'tracked-pointer') {
-      raycastFromController(this);
-    } else {
-      // Vision Pro "gaze" (or anything else): raycast from head gaze.
-      raycastFromGaze();
-    }
-  });
+  if (!selecting) return;
 
-  ctrl.addEventListener('selectend', function () {
-    this.userData.isSelecting = false;
-  });
-});
+  const hasGazeTarget = !!getGazeHit();
+  if (hasGazeTarget) return; // pinch currently over an object => selection handled in selectstart
 
+  // Step in gaze direction (XZ only) for AVP
+  const xrCam = renderer.xr.getCamera(camera);
+  const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(xrCam.quaternion);
+  dir.y = 0;
+  if (dir.lengthSq() < 1e-6) return;
+
+  dir.normalize();
+  dolly.position.addScaledVector(dir, NAV.stepSpeed * dt);
 }
+
+
 
 // ---------------------------
 // Animation loop
@@ -366,6 +423,9 @@ renderer.setAnimationLoop((t, frame) => {
 
     // Update controller/axes each XR frame
     updateInputStates(frame);
+
+    // Always update gaze reticle so you see what you'd select
+    updateGazeReticle();
 
     // AVP navigation: axes if available, otherwise Select-held stepping
     const usedAxes = applyAVPAxes(dt);
