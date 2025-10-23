@@ -117,6 +117,51 @@ function onMouseDown(event) {
   }
 }
 
+// ===============================
+// XR RAYCAST HELPERS
+// ===============================
+
+function raycastFromGaze() {
+  // Use the XR camera (stereo wrapper) to get the real head pose in XR
+  const xrCam = renderer.xr.getCamera(camera);
+
+  // Origin: head position. Direction: -Z in camera space.
+  const origin = new THREE.Vector3();
+  const dir = new THREE.Vector3(0, 0, -1);
+  xrCam.getWorldPosition(origin);
+  dir.applyQuaternion(xrCam.quaternion).normalize();
+
+  raycaster.set(origin, dir);
+
+  const hits = raycaster.intersectObjects(scene.children, true);
+  if (hits.length) {
+    const obj = hits[0].object;
+    if (obj.material && obj.material.color) {
+      obj.material.color.setRGB(Math.random(), Math.random(), Math.random());
+    }
+    console.log(`[XR gaze] ${obj.name || '(unnamed)'} selected`);
+  }
+}
+
+function raycastFromController(ctrl) {
+  const origin = new THREE.Vector3();
+  const dir = new THREE.Vector3(0, 0, -1);
+  // controller pointing down -Z in its local space
+  ctrl.getWorldPosition(origin);
+  dir.applyQuaternion(ctrl.quaternion).normalize();
+  raycaster.set(origin, dir);
+
+  const hits = raycaster.intersectObjects(scene.children, true);
+  if (hits.length) {
+    const obj = hits[0].object;
+    if (obj.material && obj.material.color) {
+      obj.material.color.setRGB(Math.random(), Math.random(), Math.random());
+    }
+    console.log(`[XR pointer] ${obj.name || '(unnamed)'} selected`);
+  }
+}
+
+
 // ---------------------------
 // XR controllers + models
 // ---------------------------
@@ -277,19 +322,35 @@ function applyAVPSelectStep(dt) {
 
   if (anyAxes) return;
 
-  [controller1, controller2].forEach(ctrl => {
-    if (!ctrl?.userData?.isSelecting) return;
-    const src = ctrl.userData.inputSource;
-    if (!isVisionProInputSource(src)) return;
-
-    const dir = new THREE.Vector3();
-    ctrl.getWorldDirection(dir);
-    dir.negate(); // controllers/gaze rays point -Z
-    dir.y = 0;
-    if (dir.lengthSq() < 1e-6) return;
-    dir.normalize();
-    dolly.position.addScaledVector(dir, NAV.stepSpeed * dt);
+  [controller1, controller2].forEach((ctrl) => {
+  ctrl.addEventListener('connected', (e) => {
+    ctrl.userData.inputSource = e.data;
+    const vis = controllerVisual(e.data);
+    if (vis) ctrl.add(vis);
   });
+  ctrl.addEventListener('disconnected', () => {
+    ctrl.userData.inputSource = null;
+    ctrl.clear();
+  });
+
+  ctrl.addEventListener('selectstart', function () {
+    this.userData.isSelecting = true;
+
+    const src = this.userData.inputSource;
+    // If it's a tracked pointer (Quest-style), raycast from controller.
+    if (src && src.targetRayMode === 'tracked-pointer') {
+      raycastFromController(this);
+    } else {
+      // Vision Pro "gaze" (or anything else): raycast from head gaze.
+      raycastFromGaze();
+    }
+  });
+
+  ctrl.addEventListener('selectend', function () {
+    this.userData.isSelecting = false;
+  });
+});
+
 }
 
 // ---------------------------
