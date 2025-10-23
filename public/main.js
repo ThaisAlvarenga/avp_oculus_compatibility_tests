@@ -169,8 +169,9 @@ const WORLD_UP = new THREE.Vector3(0, 1, 0);
 
 const NAV = {
   moveSpeed: 2.0,   // m/s for axes
-  stepSpeed: 200.0,   // meters per second-equivalent while Select-held w/ no axes
-  deadzone: 0.12
+  stepSpeed: 300.0,   // meters per second-equivalent while Select-held w/ no axes
+  deadzone: 0.12,
+  dualPinchBoost: 1.0, // scale for two-hand pinch backward speed
 };
 
 function isVisionProInputSource(inputSource) {
