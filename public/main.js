@@ -10,29 +10,29 @@ const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setClearColor(0x222230);
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
-renderer.xr.enabled = true; // ← enable WebXR
+renderer.xr.enabled = true; // Enable WebXR
 document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
 
 const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
 
-// Player rig (move/rotate this instead of orbiting camera)
+// Player rig: move/rotate this instead of orbiting camera
 const player = new THREE.Group();
 const yawPivot = new THREE.Group(); // rotate this for in-place turning
 player.add(yawPivot);
 yawPivot.add(camera);
 scene.add(player);
 
-// Desktop OrbitControls (auto-disabled in XR)
+// Desktop OrbitControls (auto-disabled while in XR)
 const controls = new OrbitControls(camera, renderer.domElement);
 camera.position.set(-5, 5, 12);
-player.position.set(-5, 0, 12);
+player.position.set(-5, 0, 12); // roughly match camera Z so switching to XR feels consistent
 camera.layers.enable(1);
 controls.target.set(-1, 2, 0);
 controls.update();
 
-// XR button
+// WebXR entry button
 document.body.appendChild(
   XRButton.createButton(renderer, {
     requiredFeatures: ['local-floor'],
@@ -89,7 +89,7 @@ boxes.add(createMesh(boxGeometry, material, -2.5, 3, 0, 'Box C', 0));
 scene.add(boxes);
 
 // ----------------------
-// Raycasting (unchanged)
+// Mouse raycasting
 // ----------------------
 const raycaster = new THREE.Raycaster();
 document.addEventListener('mousedown', onMouseDown);
@@ -104,7 +104,7 @@ function onMouseDown(event) {
   const hits = raycaster.intersectObjects(scene.children, true);
   if (hits.length > 0) {
     const obj = hits[0].object;
-    obj.material.color = new THREE.Color(Math.random(), Math.random(), Math.random());
+    if (obj.material?.color) obj.material.color = new THREE.Color(Math.random(), Math.random(), Math.random());
     console.log(`${obj.name} was clicked!`);
   }
 }
@@ -123,7 +123,7 @@ const controllers = [0, 1].map((i) => {
   return { ctrl, grip };
 });
 
-// Hands: we only read joints (no external meshes needed)
+// Hands: we only read joints (no external meshes)
 const hands = [renderer.xr.getHand(0), renderer.xr.getHand(1)];
 hands.forEach(h => scene.add(h));
 
@@ -135,7 +135,10 @@ const NAV = {
   strafeSpeed: 2.0,                             // m/s
   rotateSpeed: THREE.MathUtils.degToRad(100),   // rad/s
   stickDeadzone: 0.15,
-  pinchThreshold: 0.025                         // meters: index-tip ↔ thumb-tip
+  pinchThreshold: 0.025,                        // meters: index-tip ↔ thumb-tip
+  handDeadzone: 0.005,                          // meters in camera space to ignore jitter
+  rotGain: 2.0,                                 // yaw gain per meter of hand X movement (camera space)
+  moveGain: 20.0                                // scalar mapping hand Z motion to speed strength
 };
 
 const tmpV = new THREE.Vector3();
@@ -158,26 +161,40 @@ function jointWorldPos(hand, name, out = new THREE.Vector3()) {
   const j = hand?.joints?.[name];
   return j ? j.getWorldPosition(out) : null;
 }
-function isPinching(hand) {
+function isPinchingThreshold(hand) {
   const a = jointWorldPos(hand, 'index-finger-tip', new THREE.Vector3());
   const b = jointWorldPos(hand, 'thumb-tip', new THREE.Vector3());
   return (a && b) ? a.distanceTo(b) < NAV.pinchThreshold : false;
 }
-// Left-hand rotation rate from lateral offset of left index tip vs head
-function leftHandRotateRate() {
-  const left = hands[0];
-  const idx = jointWorldPos(left, 'index-finger-tip', new THREE.Vector3());
-  if (!idx) return 0;
-  const head = camera.getWorldPosition(new THREE.Vector3());
-  const right = headRightXZ();
-  const toIdx = new THREE.Vector3().subVectors(idx, head); toIdx.y = 0;
-  if (toIdx.lengthSq() === 0) return 0;
-  toIdx.normalize();
-  const lateral = right.dot(toIdx); // -1..1 (left..right)
-  const dz = 0.15;
-  if (Math.abs(lateral) < dz) return 0;
-  return (lateral - Math.sign(lateral) * dz) / (1 - dz); // -1..1
-}
+
+// --- AVP gesture state: lock to the first hand that pinches
+let activeHandIndex = null; // 0 = left, 1 = right, null = none
+const handState = [
+  { pinching: false, prevLocal: new THREE.Vector3(), currLocal: new THREE.Vector3() },
+  { pinching: false, prevLocal: new THREE.Vector3(), currLocal: new THREE.Vector3() }
+];
+
+// Attach pinch listeners to lock/unlock the active hand
+hands.forEach((hand, i) => {
+  hand.addEventListener('pinchstart', () => {
+    handState[i].pinching = true;
+    if (activeHandIndex === null) {
+      // Lock to the first hand that starts pinching
+      activeHandIndex = i;
+      // Initialize previous position in camera-local space
+      const world = jointWorldPos(hand, 'index-finger-tip', new THREE.Vector3());
+      if (world) {
+        handState[i].prevLocal.copy(world).applyMatrix4(camera.matrixWorldInverse);
+      }
+    }
+  });
+  hand.addEventListener('pinchend', () => {
+    handState[i].pinching = false;
+    if (activeHandIndex === i) {
+      activeHandIndex = null; // release lock
+    }
+  });
+});
 
 // ---------------------------
 // XR locomotion per frame
@@ -186,12 +203,12 @@ function updateXRMovement(dt) {
   const session = renderer.xr.getSession?.();
   if (!session) return;
 
-  // Quest 3: controller sticks (XRStandardGamepad)
+  // QUEST / controller sticks (XRStandardGamepad)
   for (const src of session.inputSources) {
     const gp = src.gamepad;
     if (!gp || !gp.axes) continue;
 
-    // Common mapping: [0,1] = left stick (x,y), [2,3] = right stick (x,y)
+    // Common mapping: [0,1]=left stick (x,y), [2,3]=right stick (x,y)
     const lsx = gp.axes[0] ?? 0;
     const lsy = gp.axes[1] ?? 0;
     const rsx = gp.axes[2] ?? 0;
@@ -206,7 +223,7 @@ function updateXRMovement(dt) {
       const fwd = headForwardXZ();
       const right = headRightXZ();
       player.position.addScaledVector(fwd, -LY * NAV.moveSpeed * dt);
-      player.position.addScaledVector(right, LX * NAV.strafeSpeed * dt);
+      player.position.addScaledVector(right,  LX * NAV.strafeSpeed * dt);
     }
     // Smooth yaw turn
     if (RX) {
@@ -214,20 +231,45 @@ function updateXRMovement(dt) {
     }
   }
 
-  // Apple Vision Pro: natural input (hands)
-  const left = hands[0], right = hands[1];
-  const leftPinch = left && isPinching(left);
-  const rightPinch = right && isPinching(right);
+  // AVP / hands (natural input: pinch + move gesture on locked hand)
+  if (activeHandIndex !== null) {
+    const i = activeHandIndex;
+    const hand = hands[i];
+    if (handState[i].pinching && isPinchingThreshold(hand)) {
+      // index-tip in camera-local space (stable axes)
+      const world = jointWorldPos(hand, 'index-finger-tip', new THREE.Vector3());
+      if (world) {
+        handState[i].currLocal.copy(world).applyMatrix4(camera.matrixWorldInverse);
 
-  // Right-hand pinch → move forward (gaze direction)
-  if (rightPinch) {
-    const fwd = headForwardXZ();
-    player.position.addScaledVector(fwd, NAV.moveSpeed * dt);
-  }
-  // Left-hand pinch → rotate in place
-  if (leftPinch) {
-    const rate = leftHandRotateRate(); // -1..1
-    yawPivot.rotation.y += rate * NAV.rotateSpeed * dt;
+        // Camera-space deltas
+        const dx = handState[i].currLocal.x - handState[i].prevLocal.x; // left(-)/right(+)
+        const dz = handState[i].currLocal.z - handState[i].prevLocal.z; // towards camera(+)/away(-)
+
+        // Deadzone to reduce jitter
+        const rx = Math.abs(dx) > NAV.handDeadzone ? dx : 0;
+        const mz = Math.abs(dz) > NAV.handDeadzone ? dz : 0;
+
+        // Horizontal hand motion -> rotate in place
+        // Positive dx (move hand right in view) => rotate right (negative yaw)
+        if (rx !== 0) {
+          yawPivot.rotation.y += (-rx) * NAV.rotGain;
+        }
+
+        // Forward/back hand motion -> move along gaze
+        if (mz !== 0) {
+          const fwd = headForwardXZ();
+          const sign = (mz < 0) ? +1 : -1; // push (negative dz) = forward, pull (positive dz) = backward
+          const strength = Math.min(1.0, Math.abs(mz) * NAV.moveGain);
+          player.position.addScaledVector(fwd, sign * NAV.moveSpeed * strength * dt);
+        }
+
+        // Update previous
+        handState[i].prevLocal.copy(handState[i].currLocal);
+      }
+    } else {
+      // If pinch released but we didn't get pinchend (edge cases), unlock
+      activeHandIndex = null;
+    }
   }
 }
 
@@ -240,11 +282,11 @@ renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.05);
 
   if (renderer.xr.isPresenting) {
-    if (controls.enabled) { controls.enabled = false; }
+    if (controls.enabled) controls.enabled = false; // disable desktop Orbit in XR
     updateXRMovement(dt);
     renderer.render(scene, camera);
   } else {
-    if (!controls.enabled) { controls.enabled = true; }
+    if (!controls.enabled) controls.enabled = true;
     controls.update();
     renderer.render(scene, camera);
   }
