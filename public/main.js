@@ -169,7 +169,7 @@ const WORLD_UP = new THREE.Vector3(0, 1, 0);
 
 const NAV = {
   moveSpeed: 2.0,   // m/s for axes
-  stepSpeed: 0.5,   // meters per second-equivalent while Select-held w/ no axes
+  stepSpeed: 2.,   // meters per second-equivalent while Select-held w/ no axes
   deadzone: 0.12
 };
 
