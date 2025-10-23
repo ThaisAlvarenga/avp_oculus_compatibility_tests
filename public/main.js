@@ -54,37 +54,6 @@ yawPivot.add(camera);
 // Start dolly near your desktop camera pose (so switching feels consistent)
 dolly.position.set(-5, 0, 12);
 
-
-// Track pinch state per hand across transient input sources (AVP)
-const pinchState = {
-  left:  { down: false, src: null },
-  right: { down: false, src: null }
-};
-
-// Map an inputSource to "left" | "right" | "none"
-function handedKeyFromSource(src) {
-  const h = src?.handedness || 'none';
-  if (h === 'left')  return 'left';
-  if (h === 'right') return 'right';
-  // AVP sometimes reports 'none' — treat as 'right' to avoid fighting left-hand locomotion.
-  return 'right';
-}
-
-// Attach these on both controllers (see next section)
-function onSelectStartEVP(e) {
-  const key = handedKeyFromSource(this.userData.inputSource);
-  pinchState[key].down = true;
-  pinchState[key].src = this.userData.inputSource;
-  this.userData.isSelecting = true;
-}
-function onSelectEndEVP(e) {
-  const key = handedKeyFromSource(this.userData.inputSource);
-  pinchState[key].down = false;
-  pinchState[key].src = null;
-  this.userData.isSelecting = false;
-}
-
-
 // ---------------------------
 // Your original scene content
 // ---------------------------
@@ -189,10 +158,8 @@ function controllerVisual(data) {
     ctrl.userData.inputSource = null;
     ctrl.clear();
   });
-
-  // use the new AVP-aware handlers
-  ctrl.addEventListener('selectstart', onSelectStartEVP);
-  ctrl.addEventListener('selectend',   onSelectEndEVP);
+  ctrl.addEventListener('selectstart', function(){ this.userData.isSelecting = true;  });
+  ctrl.addEventListener('selectend',   function(){ this.userData.isSelecting = false; });
 });
 
 // ---------------------------
@@ -203,8 +170,7 @@ const WORLD_UP = new THREE.Vector3(0, 1, 0);
 const NAV = {
   moveSpeed: 2.0,   // m/s for axes
   stepSpeed: 300.0,   // meters per second-equivalent while Select-held w/ no axes
-  deadzone: 0.12,
-  dualPinchBoost: 50.0, // scale for two-hand pinch backward speed
+  deadzone: 0.12
 };
 
 function isVisionProInputSource(inputSource) {
@@ -304,55 +270,27 @@ function applyAVPAxes(dt) {
 }
 
 function applyAVPSelectStep(dt) {
-  // If BOTH hands are pinched, we move BACKWARD along camera forward (XZ).
-  const bothPinched = pinchState.left.down && pinchState.right.down;
+  // If any axes are active, prefer axes instead of select-to-move
+  const anyAxes =
+    Math.hypot(controllerStates.left.axes.x, controllerStates.left.axes.y) > NAV.deadzone ||
+    Math.hypot(controllerStates.right.axes.x, controllerStates.right.axes.y) > NAV.deadzone;
 
-  // Axes active? We usually prefer axes, but NOT when both pinched (we override).
-  const axesMagL = Math.hypot(controllerStates.left.axes.x,  controllerStates.left.axes.y);
-  const axesMagR = Math.hypot(controllerStates.right.axes.x, controllerStates.right.axes.y);
-  const anyAxes  = (axesMagL > NAV.deadzone) || (axesMagR > NAV.deadzone);
+  if (anyAxes) return;
 
-  if (!bothPinched && anyAxes) {
-    // Single-pinch path is suppressed by active axes (comfort), as before.
-    return;
-  }
+  [controller1, controller2].forEach(ctrl => {
+    if (!ctrl?.userData?.isSelecting) return;
+    const src = ctrl.userData.inputSource;
+    if (!isVisionProInputSource(src)) return;
 
-  if (bothPinched) {
-    // Move BACKWARD from where you are looking (camera forward on XZ)
-    const fwd = headForwardXZ();       // normalized XZ forward of the HEAD
-    // Backward = negative forward
-    dolly.position.addScaledVector(fwd, -NAV.stepSpeed * (NAV.dualPinchBoost ?? 1.0) * dt);
-    return;
-  }
-
-  // Single-hand pinch => forward along that hand’s ray
-  // Prefer whichever hand is down; if both false, bail.
-  let activeCtrl = null;
-  if (pinchState.left.down) {
-    activeCtrl = controller1.userData.inputSource && handedKeyFromSource(controller1.userData.inputSource)==='left' ? controller1
-               : controller2.userData.inputSource && handedKeyFromSource(controller2.userData.inputSource)==='left' ? controller2
-               : null;
-  } else if (pinchState.right.down) {
-    activeCtrl = controller1.userData.inputSource && handedKeyFromSource(controller1.userData.inputSource)==='right' ? controller1
-               : controller2.userData.inputSource && handedKeyFromSource(controller2.userData.inputSource)==='right' ? controller2
-               : null;
-  }
-  if (!activeCtrl) return;
-
-  const dir = new THREE.Vector3();
-  activeCtrl.getWorldDirection(dir);
-
-  // If forward feels inverted in your rig, toggle the negate line below:
-  // dir.negate();
-
-  dir.y = 0; // stay level with floor
-  if (dir.lengthSq() < 1e-6) return;
-  dir.normalize();
-
-  dolly.position.addScaledVector(dir, NAV.stepSpeed * dt);
+    const dir = new THREE.Vector3();
+    ctrl.getWorldDirection(dir);
+    dir.negate(); // controllers/gaze rays point -Z
+    dir.y = 0;
+    if (dir.lengthSq() < 1e-6) return;
+    dir.normalize();
+    dolly.position.addScaledVector(dir, NAV.stepSpeed * dt);
+  });
 }
-
-
 
 // ---------------------------
 // Animation loop
