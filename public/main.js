@@ -54,72 +54,6 @@ yawPivot.add(camera);
 // Start dolly near your desktop camera pose (so switching feels consistent)
 dolly.position.set(-5, 0, 12);
 
-
-
-// --- XRDebugHUD: head-locked text panel for WebXR debugging ---
-class XRDebugHUD {
-  constructor(camera, {
-    width = 512,
-    height = 384,
-    pxPerLine = 22,
-    scale = 0.35,             // world size of the panel (meters-ish)
-    offset = new THREE.Vector3(0.0, -0.08, -0.6) // relative to camera
-  } = {}) {
-    this.camera = camera;
-    this.width = width;
-    this.height = height;
-    this.pxPerLine = pxPerLine;
-    this.offset = offset.clone();
-
-    this.canvas = document.createElement('canvas');
-    this.canvas.width = width;
-    this.canvas.height = height;
-    this.ctx = this.canvas.getContext('2d');
-
-    this.texture = new THREE.CanvasTexture(this.canvas);
-    this.texture.colorSpace = THREE.SRGBColorSpace;
-
-    const mat = new THREE.MeshBasicMaterial({
-      map: this.texture,
-      transparent: true
-    });
-    const geo = new THREE.PlaneGeometry(scale, scale * (height / width));
-    this.mesh = new THREE.Mesh(geo, mat);
-
-    // Head-locked: attach to the camera and offset a little in view
-    this.camera.add(this.mesh);
-    this.mesh.position.copy(this.offset);
-  }
-
-  setLines(lines) {
-    const ctx = this.ctx;
-    ctx.clearRect(0, 0, this.width, this.height);
-
-    // semi-transparent dark background
-    ctx.fillStyle = 'rgba(10,12,18,0.7)';
-    ctx.fillRect(0, 0, this.width, this.height);
-
-    ctx.font = '16px monospace';
-    ctx.fillStyle = '#bfe3ff';
-    ctx.textBaseline = 'top';
-
-    let y = 8;
-    for (const line of lines) {
-      ctx.fillText(String(line), 8, y);
-      y += this.pxPerLine;
-      if (y > this.height - this.pxPerLine) break; // avoid overflow
-    }
-
-    this.texture.needsUpdate = true;
-  }
-}
-// After yawPivot.add(camera);
-const hud = new XRDebugHUD(camera); // head-locked debug panel
-
-
-
-
-
 // ---------------------------
 // Your original scene content
 // ---------------------------
@@ -235,7 +169,7 @@ const WORLD_UP = new THREE.Vector3(0, 1, 0);
 
 const NAV = {
   moveSpeed: 2.0,   // m/s for axes
-  stepSpeed: 10.0,   // meters per second-equivalent while Select-held w/ no axes
+  stepSpeed: 100.0,   // meters per second-equivalent while Select-held w/ no axes
   deadzone: 0.12
 };
 
@@ -307,6 +241,7 @@ function headRightXZ() {
 }
 
 function applyAVPAxes(dt) {
+  // Prefer axes if present; on AVP we only use Y (no strafe) for comfort.
   const L = controllerStates.left.axes;
   const isVP = controllerStates.left.isVision || controllerStates.right.isVision;
 
@@ -324,24 +259,15 @@ function applyAVPAxes(dt) {
   if (!x && !y) return false;
 
   const forward = headForwardXZ();
-  const before = dolly.position.clone();
-  // AVP: forward/back only (no strafe)
-  dolly.position.addScaledVector(forward, -y * NAV.moveSpeed * dt);
-
-  const delta = dolly.position.clone().sub(before);
-  const lines = [
-    'AXES LOCOMOTION',
-    `L axes: x=${controllerStates.left.axes.x.toFixed(2)} y=${controllerStates.left.axes.y.toFixed(2)}`,
-    `R axes: x=${controllerStates.right.axes.x.toFixed(2)} y=${controllerStates.right.axes.y.toFixed(2)}`,
-    `headFwdXZ: (${forward.x.toFixed(2)}, ${forward.y.toFixed(2)}, ${forward.z.toFixed(2)})`,
-    `deltaPos: (${delta.x.toFixed(3)}, ${delta.y.toFixed(3)}, ${delta.z.toFixed(3)})`,
-    `dt=${dt.toFixed(3)}  moveSpeed=${NAV.moveSpeed}  (VP=${isVP})`
-  ];
-  hud.setLines(lines);
-
+  if (isVP) {
+    // AVP: forward/back only
+    dolly.position.addScaledVector(forward, -y * NAV.moveSpeed * dt);
+  } else {
+    // (If you want to support non-AVP axes later, add strafe here)
+    dolly.position.addScaledVector(forward, -y * NAV.moveSpeed * dt);
+  }
   return true;
 }
-
 
 function applyAVPSelectStep(dt) {
   // If any axes are active, prefer axes instead of select-to-move
@@ -349,53 +275,22 @@ function applyAVPSelectStep(dt) {
     Math.hypot(controllerStates.left.axes.x, controllerStates.left.axes.y) > NAV.deadzone ||
     Math.hypot(controllerStates.right.axes.x, controllerStates.right.axes.y) > NAV.deadzone;
 
-  if (anyAxes) {
-    // Show axes on HUD even if we early-return
-    hud.setLines([
-      'AXES ACTIVE (prefer axes path)',
-      `L axes: x=${controllerStates.left.axes.x.toFixed(2)} y=${controllerStates.left.axes.y.toFixed(2)}`,
-      `R axes: x=${controllerStates.right.axes.x.toFixed(2)} y=${controllerStates.right.axes.y.toFixed(2)}`,
-      `dt: ${dt.toFixed(3)}  speed(step): ${NAV.stepSpeed}`
-    ]);
-    return;
-  }
+  if (anyAxes) return;
 
-  // Helper to stringify a vector
-  const fmtV = (v) => `(${v.x.toFixed(2)}, ${v.y.toFixed(2)}, ${v.z.toFixed(2)})`;
+  [controller1, controller2].forEach(ctrl => {
+    if (!ctrl?.userData?.isSelecting) return;
+    const src = ctrl.userData.inputSource;
+    if (!isVisionProInputSource(src)) return;
 
-  // Gather per-controller debug and perform forward stepping
-  const lines = [];
-  const headFwd = headForwardXZ();
-  lines.push(`dt: ${dt.toFixed(3)}  stepSpeed: ${NAV.stepSpeed}`);
-  lines.push(`headFwdXZ: ${fmtV(headFwd)}`);
-
-  [controller1, controller2].forEach((ctrl, i) => {
-    const isSel = !!ctrl?.userData?.isSelecting;
-    const src = ctrl?.userData?.inputSource;
-    const isVP = isVisionProInputSource(src);
-
-    let dir = new THREE.Vector3();
-    if (isSel && isVP) {
-      ctrl.getWorldDirection(dir);   // forward already
-      const dirXZ = dir.clone(); dirXZ.y = 0; dirXZ.normalize();
-      const dot = dirXZ.dot(headFwd); // +1 means along head forward, -1 opposite
-
-      // Move forward along that ray (grounded)
-      if (dirXZ.lengthSq() > 0) {
-        dolly.position.addScaledVector(dirXZ, NAV.stepSpeed * dt);
-      }
-
-      lines.push(`C${i}: SELECT held (VP=${isVP})`);
-      lines.push(`  rayDir: ${fmtV(dir)}`);
-      lines.push(`  rayDirXZ: ${fmtV(dirXZ)}  dot(head)= ${dot.toFixed(2)}  (forward if > 0)`);
-    } else {
-      lines.push(`C${i}: select=${isSel} VP=${isVP}`);
-    }
+    const dir = new THREE.Vector3();
+    ctrl.getWorldDirection(dir);
+    dir.negate(); // controllers/gaze rays point -Z
+    dir.y = 0;
+    if (dir.lengthSq() < 1e-6) return;
+    dir.normalize();
+    dolly.position.addScaledVector(dir, NAV.stepSpeed * dt);
   });
-
-  hud.setLines(lines);
 }
-
 
 // ---------------------------
 // Animation loop
