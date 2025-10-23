@@ -284,7 +284,7 @@ function applyAVPSelectStep(dt) {
 
     const dir = new THREE.Vector3();
     ctrl.getWorldDirection(dir);
-    //dir.negate(); // controllers/gaze rays point -Z
+    dir.negate(); // controllers/gaze rays point -Z
     dir.y = 0;
     if (dir.lengthSq() < 1e-6) return;
     dir.normalize();
