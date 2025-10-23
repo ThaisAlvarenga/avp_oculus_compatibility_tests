@@ -15,7 +15,7 @@ document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
 
-// Lights
+// Lights (as before)
 const light = new THREE.DirectionalLight();
 light.intensity = 2;
 light.position.set(2, 5, 10);
@@ -37,18 +37,21 @@ controls.update();
 document.body.appendChild(
   XRButton.createButton(renderer, {
     requiredFeatures: ['local-floor'],
-    optionalFeatures: ['hand-tracking'] // harmless if not available
+    optionalFeatures: ['hand-tracking'] // harmless if not present
   })
 );
 
 // ---------------------------
-/* Dolly rig for locomotion: move/rotate this, not the camera directly */
+// Dolly rig for locomotion
+// ---------------------------
 const dolly = new THREE.Group();
 scene.add(dolly);
-const yawPivot = new THREE.Group();
+
+const yawPivot = new THREE.Group(); // keep in case you later want rotation
 dolly.add(yawPivot);
 yawPivot.add(camera);
-// Seed near your desktop pose so the transition feels consistent
+
+// Start dolly near your desktop camera pose (so switching feels consistent)
 dolly.position.set(-5, 0, 12);
 
 // ---------------------------
@@ -129,6 +132,7 @@ controllerGrip1.add(controllerFactory.createControllerModel(controllerGrip1));
 controllerGrip2.add(controllerFactory.createControllerModel(controllerGrip2));
 scene.add(controllerGrip1, controllerGrip2);
 
+// Minimal visuals per inputSource
 function controllerVisual(data) {
   if (!data) return null;
   if (data.targetRayMode === 'tracked-pointer') {
@@ -144,7 +148,6 @@ function controllerVisual(data) {
   }
   return null;
 }
-
 [controller1, controller2].forEach((ctrl) => {
   ctrl.addEventListener('connected', (e) => {
     ctrl.userData.inputSource = e.data;
@@ -165,8 +168,8 @@ function controllerVisual(data) {
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
 
 const NAV = {
-  moveSpeed: 2.0,   // speed with axes (trackpad-like)
-  stepSpeed: 300.0,   // speed while holding Select (pinch) with no axes
+  moveSpeed: 2.0,   // m/s for axes
+  stepSpeed: 300.0,   // meters per second-equivalent while Select-held w/ no axes
   deadzone: 0.12
 };
 
@@ -200,10 +203,11 @@ function updateInputStates(frame) {
 
   session.inputSources.forEach(src => {
     const gp = src.gamepad;
-    if (!gp) return;
+    if (!gp) return; // AVP transient-pointer still exposes axes as a "gamepad"
     const handed = src.handedness;
     const isVP = isVisionProInputSource(src);
 
+    // prefer [0,1], some devices may put "right pad" on [2,3]
     let x = 0, y = 0;
     if (gp.axes && gp.axes.length >= 2) {
       x = gp.axes[0] || 0;
@@ -215,7 +219,7 @@ function updateInputStates(frame) {
     st.isVision = isVP;
     st.input = src;
 
-    // If AVP reports 'none', mirror to left slot so we always read something
+    // If AVP reports handedness "none", mirror into left slot for simplicity
     if (handed === 'none' && isVP) {
       controllerStates.left.axes.x = x;
       controllerStates.left.axes.y = y;
@@ -232,16 +236,20 @@ function headForwardXZ() {
   if (tmpV.lengthSq() === 0) tmpV.set(0,0,-1);
   return tmpV.normalize();
 }
+function headRightXZ() {
+  return new THREE.Vector3().crossVectors(WORLD_UP, headForwardXZ()).negate().normalize();
+}
 
-// Axes-based motion (prefer this when present). For AVP, Y-only for comfort.
 function applyAVPAxes(dt) {
+  // Prefer axes if present; on AVP we only use Y (no strafe) for comfort.
   const L = controllerStates.left.axes;
-  const dz = NAV.deadzone;
+  const isVP = controllerStates.left.isVision || controllerStates.right.isVision;
 
+  const dz = NAV.deadzone;
   let x = Math.abs(L.x) < dz ? 0 : L.x;
   let y = Math.abs(L.y) < dz ? 0 : L.y;
 
-  // If left has nothing but right has AVP axes, mirror from right
+  // If AVP only reports axes on the "right", mirror from right
   if (!x && !y && controllerStates.right.isVision) {
     const R = controllerStates.right.axes;
     x = Math.abs(R.x) < dz ? 0 : R.x;
@@ -250,19 +258,24 @@ function applyAVPAxes(dt) {
 
   if (!x && !y) return false;
 
-  // AVP: forward/back only (no strafe)
   const forward = headForwardXZ();
-  dolly.position.addScaledVector(forward, -y * NAV.moveSpeed * dt);
+  if (isVP) {
+    // AVP: forward/back only
+    dolly.position.addScaledVector(forward, -y * NAV.moveSpeed * dt);
+  } else {
+    // (If you want to support non-AVP axes later, add strafe here)
+    dolly.position.addScaledVector(forward, -y * NAV.moveSpeed * dt);
+  }
   return true;
 }
 
-// Select-held stepping: forward along the active controller's ray (flattened)
 function applyAVPSelectStep(dt) {
-  // If any axes are active, prefer axes path
-  const axesActive =
+  // If any axes are active, prefer axes instead of select-to-move
+  const anyAxes =
     Math.hypot(controllerStates.left.axes.x, controllerStates.left.axes.y) > NAV.deadzone ||
     Math.hypot(controllerStates.right.axes.x, controllerStates.right.axes.y) > NAV.deadzone;
-  if (axesActive) return;
+
+  if (anyAxes) return;
 
   [controller1, controller2].forEach(ctrl => {
     if (!ctrl?.userData?.isSelecting) return;
@@ -271,10 +284,7 @@ function applyAVPSelectStep(dt) {
 
     const dir = new THREE.Vector3();
     ctrl.getWorldDirection(dir);
-
-    // If forward feels inverted in your rig, toggle the next line:
-    // dir.negate();
-
+    dir.negate(); // controllers/gaze rays point -Z
     dir.y = 0;
     if (dir.lengthSq() < 1e-6) return;
     dir.normalize();
@@ -293,8 +303,10 @@ renderer.setAnimationLoop((t, frame) => {
   if (renderer.xr.isPresenting) {
     if (controls.enabled) controls.enabled = false;
 
+    // Update controller/axes each XR frame
     updateInputStates(frame);
 
+    // AVP navigation: axes if available, otherwise Select-held stepping
     const usedAxes = applyAVPAxes(dt);
     if (!usedAxes) applyAVPSelectStep(dt);
   } else {
