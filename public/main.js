@@ -268,7 +268,6 @@ function applyAVPAxes(dt) {
   }
   return true;
 }
-
 function applyAVPSelectStep(dt) {
   // If any axes are active, prefer axes instead of select-to-move
   const anyAxes =
@@ -277,20 +276,37 @@ function applyAVPSelectStep(dt) {
 
   if (anyAxes) return;
 
-  [controller1, controller2].forEach(ctrl => {
-    if (!ctrl?.userData?.isSelecting) return;
-    const src = ctrl.userData.inputSource;
-    if (!isVisionProInputSource(src)) return;
+  const isPinching = (ctrl) =>
+    ctrl?.userData?.isSelecting && isVisionProInputSource(ctrl.userData.inputSource);
 
-    const dir = new THREE.Vector3();
-    ctrl.getWorldDirection(dir);
-    dir.negate(); // controllers/gaze rays point -Z
-    dir.y = 0;
-    if (dir.lengthSq() < 1e-6) return;
-    dir.normalize();
-    dolly.position.addScaledVector(dir, NAV.stepSpeed * dt);
-  });
+  const leftPinch  = isPinching(controller1);
+  const rightPinch = isPinching(controller2);
+
+  // --- NEW: both hands pinching => move BACKWARD along gaze (camera forward) ---
+  if (leftPinch && rightPinch) {
+    const dir = headForwardXZ();   // camera forward, flattened to XZ
+    // Move backward from where you're looking:
+    dolly.position.addScaledVector(dir, -NAV.stepSpeed * NAV.dualPinchBoost * dt);
+    return; // handled two-hand case
+  }
+
+  // Single-hand pinch => move forward along that hand’s pointer/gaze ray
+  const active = leftPinch ? controller1 : rightPinch ? controller2 : null;
+  if (!active) return;
+
+  const dir = new THREE.Vector3();
+  active.getWorldDirection(dir);
+
+  // If your forward feels inverted, toggle the next line:
+  // dir.negate(); // uncomment if your ray points -Z in your rig
+
+  dir.y = 0;                    // stay level on the floor
+  if (dir.lengthSq() < 1e-6) return;
+  dir.normalize();
+
+  dolly.position.addScaledVector(dir, NAV.stepSpeed * dt);
 }
+
 
 // ---------------------------
 // Animation loop
